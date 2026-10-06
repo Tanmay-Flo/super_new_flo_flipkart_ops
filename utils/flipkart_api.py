@@ -130,11 +130,25 @@ def fetch_access_token(settings: FlipkartSettings) -> str:
 # ==========================================================================
 # Payload helpers
 # ==========================================================================
+def delivery_partner_fields(shipping_provider) -> tuple[str, str]:
+    """
+    Returns (deliveryPartner, deliveryPartnerCode) from the Shipping provider value.
+    Matching is case-insensitive and looks anywhere in the text:
+        contains "delhivery" -> ("DELHIVERY", "DELHIVERY")
+        contains "ekart"     -> ("Ekart", "Other")
+        anything else        -> ("Other", "Other")
+    """
+    text = "" if _blank(shipping_provider) else str(shipping_provider).lower()
+    if "delhivery" in text:
+        return "DELHIVERY", "DELHIVERY"
+    if "ekart" in text:
+        return "Ekart", "self_ship_vendor"
+    return "Other", "self_ship_vendor"
+
+
 def delivery_partner(shipping_provider) -> str:
-    """'DELHIVERY' if 'delhivery' appears anywhere (any case), else 'Other'."""
-    if shipping_provider is not None and "delhivery" in str(shipping_provider).lower():
-        return "DELHIVERY"
-    return "Other"
+    """deliveryPartner value only (used for the 'Delivery Partner Sent' column)."""
+    return delivery_partner_fields(shipping_provider)[0]
 
 
 def utc_now_iso() -> str:
@@ -235,7 +249,7 @@ def build_shipments(
             continue
 
         first = group.iloc[0]
-        partner = delivery_partner(first["Shipping provider"])
+        partner, partner_code = delivery_partner_fields(first["Shipping provider"])
         location_id = str(first["Location ID"]).strip()
 
         shipment = {
@@ -243,7 +257,7 @@ def build_shipments(
             "tentativeDeliveryDate": date_to_iso_datetime(first["Tentative Delivery Date"]),
             "dispatchDate": dispatch_date,
             "deliveryPartner": partner,
-            "deliveryPartnerCode": partner,
+            "deliveryPartnerCode": partner_code,
             "trackingId": str(first["Tracking Number"]).strip(),
             "locationId": location_id,
             "invoice": {
