@@ -1,0 +1,17 @@
+[theme]
+base = "light"
+primaryColor = "#2874F0"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F4F6FA"
+textColor = "#172B4D"
+
+[server]
+# Max upload size per file in MB (Flipkart exports are small, 200 is plenty)
+maxUploadSize = 200
+runOnSave = true
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"

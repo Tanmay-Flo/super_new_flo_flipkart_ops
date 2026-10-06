@@ -1,0 +1,20 @@
+# Secrets - NEVER commit
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Data files
+*.csv
+*.xlsx
+
+# OS / editor
+.DS_Store
+.vscode/
+
+# Dispatch audit logs (contain order data)
+dispatch_logs/
+.env
