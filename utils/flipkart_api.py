@@ -142,8 +142,8 @@ def delivery_partner_fields(shipping_provider) -> tuple[str, str]:
     if "delhivery" in text:
         return "DELHIVERY", "DELHIVERY"
     if "ekart" in text:
-        return "Ekart", "self_ship_vendor"
-    return "Other", "self_ship_vendor"
+        return "Ekart", "Other"
+    return "Other", "Other"
 
 
 def delivery_partner(shipping_provider) -> str:
@@ -219,6 +219,21 @@ def _item_quantity(row) -> int:
     return 1
 
 
+def _shipment_items(group: pd.DataFrame) -> list[dict]:
+    """
+    invoice.items for one shipment. A repeated Order Item ID (multi-quantity
+    item whose rows mapped to the SAME Sale Order Code) becomes one entry
+    with the quantities added up, e.g. two rows of qty 1 -> quantity 2.
+    Rows that mapped to DIFFERENT Sale Order Codes are in different
+    shipments, so each one is sent separately with its own tracking ID.
+    """
+    totals: dict[str, int] = {}
+    for _, row in group.iterrows():
+        item_id = str(row["Order Item ID"]).strip()
+        totals[item_id] = totals.get(item_id, 0) + _item_quantity(row)
+    return [{"orderItemId": item_id, "quantity": qty} for item_id, qty in totals.items()]
+
+
 def build_shipments(
     df: pd.DataFrame, dispatch_date: str
 ) -> tuple[list[dict], dict[str, list], dict]:
@@ -262,13 +277,7 @@ def build_shipments(
             "locationId": location_id,
             "invoice": {
                 "invoiceDate": str(first["Invoice Date"]).strip()[:10],
-                "items": [
-                    {
-                        "orderItemId": str(row["Order Item ID"]).strip(),
-                        "quantity": _item_quantity(row),
-                    }
-                    for _, row in group.iterrows()
-                ],
+                "items": _shipment_items(group),
             },
             "dispatchLocation": {
                 "locationId": location_id,
@@ -417,14 +426,6 @@ def dispatch_self_ship_orders(
     invalid = reasons != ""
     df.loc[invalid, config.RESULT_STATUS_COLUMN] = "Not Sent – Missing Data"
     df.loc[invalid, config.NOT_DISPATCHED_REASON_COLUMN] = reasons[invalid]
-
-    # ---- 1b. duplicate Order Item IDs: send each item only once ----------
-    dup = ~invalid & df.duplicated(subset="Order Item ID", keep="first") & \
-        df["Order Item ID"].isin(df.loc[~invalid, "Order Item ID"])
-    df.loc[dup, config.RESULT_STATUS_COLUMN] = "Not Sent – Duplicate Row"
-    df.loc[dup, config.NOT_DISPATCHED_REASON_COLUMN] = (
-        "Duplicate row - this Order Item ID is sent once via its first row")
-    invalid = invalid | dup
 
     # ---- 2. build shipments ---------------------------------------------
     shipments, rows_by_sid, conflicts = build_shipments(df[~invalid], dispatch_date)

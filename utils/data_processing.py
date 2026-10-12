@@ -8,8 +8,9 @@ Pipeline:
     2. load_self_ship_files()        -> do step 1 for every file and concat
     3. normalize_order_item_id()     -> "12345-1" -> "12345"
     4. merge_mongo_data()            -> left-join MongoDB columns onto SELF
+                                        (repeated Order Item IDs paired 1-to-1)
     5. add_warehouse_columns()       -> Location ID + WH address from Facility
-    6. build_quality_report()        -> duplicates / unmapped / missing values
+    6. build_quality_report()        -> repeated IDs / unmapped / missing values
     7. split_by_dispatch_date()      -> SELF  vs  SELF_NOT_DISPATCHED
 """
 
@@ -227,38 +228,107 @@ def unique_order_item_ids(df: pd.DataFrame) -> list[str]:
 # ==========================================================================
 # 4. Prepare MongoDB results and merge into SELF
 # ==========================================================================
+# A Flipkart Order Item ID can legitimately appear on several rows of the
+# Self-Ship file (one row per unit when quantity > 1). In MongoDB the same
+# item then has several records, e.g.  4250...01-1, 4250...01-2.
+# Sometimes the records even share the SAME Sale Order Item Code
+# (e.g. three docs all "4250...01-1") but have different Sale Order Codes.
+# Rows and records are paired ONE-TO-ONE in order:
+#     1st file row  <-> 1st MongoDB record (lowest suffix)
+#     2nd file row  <-> 2nd MongoDB record
+#     ...
+# so two rows never get the same Sale Order Code / Tracking Number.
+OCCURRENCE_COLUMN = "_occurrence"
+MONGO_MATCH_STATUS_COLUMN = "MongoDB Match Status"
+
+
+def _suffix_sort_key(code: str) -> tuple:
+    """'4250-2' -> (1, 2, '2'); '4250' -> (0, 0, ''). Numeric suffixes sort naturally."""
+    code = str(code).strip()
+    if "-" not in code:
+        return (0, 0, "")
+    suffix = code.split("-", 1)[1]
+    try:
+        return (1, int(suffix), suffix)
+    except ValueError:
+        return (2, 0, suffix)
+
+
 def prepare_mongo_df(mongo_records: list[dict]) -> pd.DataFrame:
     """
     Turn raw MongoDB documents into a clean dataframe:
       - create base 'Order Item ID' from 'Sale Order Item Code'
-      - keep only required columns
-      - if several docs share the same base ID, keep the first
+      - drop only TRUE repeats (same Sale Order Item Code AND same Sale Order
+        Code AND same Tracking Number). Records that share a Sale Order Item
+        Code but have different Sale Order Codes are separate units and are
+        all kept.
+      - sort each Order Item ID's records by suffix (-1, -2, -3 ...); records
+        with the same suffix keep MongoDB's order
+      - number them 0, 1, 2 ... per Order Item ID (used for one-to-one pairing)
     """
+    out_cols = ["Order Item ID", OCCURRENCE_COLUMN, config.MONGO_MATCH_FIELD] + \
+        config.MONGO_MERGE_COLUMNS
+
     mongo_df = pd.DataFrame(mongo_records)
     if mongo_df.empty:
-        return pd.DataFrame(columns=["Order Item ID"] + config.MONGO_MERGE_COLUMNS)
+        return pd.DataFrame(columns=out_cols)
 
     # Make sure every expected column exists even if Mongo didn't return it
     for col in [config.MONGO_MATCH_FIELD] + config.MONGO_MERGE_COLUMNS:
         if col not in mongo_df.columns:
             mongo_df[col] = None
 
+    mongo_df[config.MONGO_MATCH_FIELD] = mongo_df[config.MONGO_MATCH_FIELD].astype(str).str.strip()
+    repeat_key = [config.MONGO_MATCH_FIELD, "Sale Order Code", "Tracking Number"]
+    mongo_df = mongo_df.drop_duplicates(subset=repeat_key, keep="first")
+
     mongo_df["Order Item ID"] = normalize_order_item_id(mongo_df[config.MONGO_MATCH_FIELD])
 
-    mongo_df = mongo_df[["Order Item ID"] + config.MONGO_MERGE_COLUMNS]
+    mongo_df["_sort"] = mongo_df[config.MONGO_MATCH_FIELD].map(_suffix_sort_key)
+    mongo_df = mongo_df.sort_values(["Order Item ID", "_sort"], kind="stable")
+    mongo_df[OCCURRENCE_COLUMN] = mongo_df.groupby("Order Item ID").cumcount()
 
-    mongo_df = mongo_df.drop_duplicates(subset="Order Item ID", keep="first")
-    return mongo_df.reset_index(drop=True)
+    return mongo_df[out_cols].reset_index(drop=True)
 
 
 def merge_mongo_data(self_df: pd.DataFrame, mongo_df: pd.DataFrame) -> pd.DataFrame:
-    """Left-merge MongoDB columns onto SELF on 'Order Item ID'."""
+    """
+    Left-merge MongoDB columns onto SELF, pairing repeated Order Item IDs
+    one-to-one (n-th row of an Order Item ID gets its n-th MongoDB record).
+    Adds 'Sale Order Item Code' and 'MongoDB Match Status' columns.
+    The number of rows in SELF never changes.
+    """
+    out = self_df.copy()
+    out[OCCURRENCE_COLUMN] = out.groupby("Order Item ID", sort=False).cumcount()
+
     if mongo_df.empty:
-        out = self_df.copy()
+        out[config.MONGO_MATCH_FIELD] = None
         for col in config.MONGO_MERGE_COLUMNS:
             out[col] = None
-        return out
-    return self_df.merge(mongo_df, on="Order Item ID", how="left")
+    else:
+        out = out.merge(mongo_df, on=["Order Item ID", OCCURRENCE_COLUMN], how="left")
+
+    # ---- explain each row's mapping ---------------------------------------
+    rows_in_file = out.groupby("Order Item ID")["Order Item ID"].transform("size")
+    if mongo_df.empty:
+        records = pd.Series(0, index=out.index)
+    else:
+        counts = mongo_df.groupby("Order Item ID").size()
+        records = out["Order Item ID"].map(counts).fillna(0).astype(int)
+
+    matched = out[config.MONGO_MATCH_FIELD].notna() & \
+        (out[config.MONGO_MATCH_FIELD].astype(str).str.strip() != "")
+    status = pd.Series("Matched", index=out.index, dtype="object")
+    status[~matched & (records == 0)] = "Not found in MongoDB"
+    short = ~matched & (records > 0)
+    status[short] = (
+        "Not enough MongoDB records for this repeated Order Item ID (file rows: "
+        + rows_in_file[short].astype(str) + ", MongoDB records: "
+        + records[short].astype(str) + ")"
+    )
+    out[MONGO_MATCH_STATUS_COLUMN] = status
+
+    return out.drop(columns=[OCCURRENCE_COLUMN])
 
 
 # ==========================================================================
@@ -308,8 +378,9 @@ class QualityReport:
     shape_before: tuple[int, int]
     shape_after: tuple[int, int]
     mongo_records_found: int
-    duplicate_rows: pd.DataFrame          # every row whose Order Item ID repeats
-    duplicate_id_count: int               # how many distinct IDs repeat
+    repeated_rows: pd.DataFrame           # rows whose Order Item ID repeats (multi-quantity)
+    repeated_id_count: int                # how many distinct Order Item IDs repeat
+    shared_record_rows: pd.DataFrame      # rows that ended up on the SAME MongoDB record (should be 0)
     unmapped_rows: pd.DataFrame           # no MongoDB match at all
     missing_shipping_rows: pd.DataFrame   # mapped but Shipping provider blank
     missing_tracking_rows: pd.DataFrame   # mapped but Tracking Number blank
@@ -322,8 +393,15 @@ def build_quality_report(
     final_df: pd.DataFrame,
     mongo_records_found: int,
 ) -> QualityReport:
-    dup_mask = final_df.duplicated(subset="Order Item ID", keep=False)
-    duplicate_rows = final_df[dup_mask].sort_values("Order Item ID")
+    rep_mask = final_df.duplicated(subset="Order Item ID", keep=False)
+    repeated_rows = final_df[rep_mask].sort_values("Order Item ID", kind="stable")
+
+    # Two rows on the SAME MongoDB record = same Sale Order Item Code AND same
+    # Sale Order Code (a shared item code with different Sale Order Codes is fine)
+    code = final_df[config.MONGO_MATCH_FIELD]
+    has_code = ~_is_blank(code)
+    shared_mask = has_code & final_df.duplicated(
+        subset=[config.MONGO_MATCH_FIELD, "Sale Order Code"], keep=False)
 
     unmapped_mask = _is_blank(final_df["Sale Order Code"])
     ship_blank = _is_blank(final_df["Shipping provider"])
@@ -336,8 +414,9 @@ def build_quality_report(
         shape_before=shape_before,
         shape_after=final_df.shape,
         mongo_records_found=mongo_records_found,
-        duplicate_rows=duplicate_rows,
-        duplicate_id_count=int(duplicate_rows["Order Item ID"].nunique()),
+        repeated_rows=repeated_rows,
+        repeated_id_count=int(repeated_rows["Order Item ID"].nunique()),
+        shared_record_rows=final_df[shared_mask],
         unmapped_rows=final_df[unmapped_mask],
         missing_shipping_rows=final_df[~unmapped_mask & ship_blank],
         missing_tracking_rows=final_df[~unmapped_mask & track_blank],
@@ -389,8 +468,15 @@ def split_by_dispatch_date(
         ship_blank = _is_blank(df["Shipping provider"])
         loc_blank = df["Location ID"].isna()
 
+        # Mapping problem: use the detailed MongoDB Match Status when present
+        if MONGO_MATCH_STATUS_COLUMN in df.columns:
+            match_status = df[MONGO_MATCH_STATUS_COLUMN].fillna("Not found in MongoDB")
+            problems.append(match_status.where(match_status != "Matched", ""))
+        else:
+            problems.append(_is_blank(df["Sale Order Code"]).map(
+                lambda m: "Not found in MongoDB" if m else ""))
+
         for mask, text in [
-            (_is_blank(df["Sale Order Code"]), "Not found in MongoDB"),
             (track_blank, "Missing Tracking Number"),
             (ship_blank, "Missing Shipping provider"),
             (loc_blank, "Warehouse / Location ID not mapped"),

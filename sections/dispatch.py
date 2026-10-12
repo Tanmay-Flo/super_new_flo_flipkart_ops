@@ -6,7 +6,7 @@ sections/dispatch.py
 Steps shown to the user:
   1. Upload Self-Ship order CSV files (one or many locations)
   2. Process: read + clean + concat -> fetch MongoDB -> merge -> WH columns
-  3. Review data quality (shape before/after, duplicates, unmapped, missing)
+  3. Review data quality (shape before/after, repeated IDs, unmapped, missing)
   4. Choose Dispatch By Date(s) -> split SELF / SELF_NOT_DISPATCHED
   5. Confirm dispatch on Flipkart (Yes / No)
 
@@ -36,7 +36,6 @@ K_RUN_ID = "dispatch_run_id"
 K_RESULT = "dispatch_result"
 K_CONFIRM = "dispatch_confirmation"
 K_EXCLUDE = "dispatch_exclude_incomplete"
-K_DROP_DUPES = "dispatch_drop_duplicates"
 K_SELF = "SELF"
 K_SELF_NOT = "SELF_NOT_DISPATCHED"
 K_OUTCOME = "dispatch_outcome"
@@ -50,7 +49,6 @@ def _init_state() -> None:
         K_RESULT: None,
         K_CONFIRM: None,
         K_EXCLUDE: True,
-        K_DROP_DUPES: False,
         K_SELF: None,
         K_SELF_NOT: None,
         K_OUTCOME: None,
@@ -157,7 +155,8 @@ def _run_pipeline(uploaded_files) -> None:
         mongo_df = dp.prepare_mongo_df(records)
         st.write(
             f"✅ MongoDB records found: **{len(records):,}** "
-            f"({len(mongo_df):,} unique Order Item IDs after de-duplication)"
+            f"({len(mongo_df):,} usable after removing exact repeats; repeated Order Item IDs "
+            "are paired one-to-one with their records)"
         )
 
         # ---- 4. merge ----------------------------------------------------
@@ -197,7 +196,8 @@ def _render_review(result: dict) -> None:
 
     n_unmapped = len(report.unmapped_rows)
     n_missing = len(report.missing_ship_or_track_rows)
-    n_dup_rows = len(report.duplicate_rows)
+    n_rep_rows = len(report.repeated_rows)
+    n_shared = len(report.shared_record_rows)
     ok_files = [r for r in load.file_results if r.ok]
     bad_files = [r for r in load.file_results if not r.ok]
 
@@ -217,11 +217,12 @@ def _render_review(result: dict) -> None:
     ])
     st.write("")
     metric_row([
-        {"label": "Duplicate Order Item IDs", "value": report.duplicate_id_count,
-         "hint": f"{n_dup_rows:,} rows involved" if n_dup_rows else "No duplicates",
-         "tone": "amber" if n_dup_rows else "green"},
+        {"label": "Repeated Order Item IDs", "value": report.repeated_id_count,
+         "hint": (f"{n_rep_rows:,} rows · multi-quantity, mapped 1-to-1" if n_rep_rows
+                  else "None in this upload"),
+         "tone": "blue" if n_rep_rows else "green"},
         {"label": "Orders not mapped", "value": n_unmapped,
-         "hint": "No match in MongoDB", "tone": "red" if n_unmapped else "green"},
+         "hint": "No (or not enough) MongoDB records", "tone": "red" if n_unmapped else "green"},
         {"label": "Missing Shipping / Tracking", "value": n_missing,
          "hint": "Shipping provider or Tracking Number blank (incl. unmapped)",
          "tone": "red" if n_missing else "green"},
@@ -242,18 +243,27 @@ def _render_review(result: dict) -> None:
     else:
         st.warning(
             f"Row count changed during the merge: {report.shape_before[0]:,} → "
-            f"{report.shape_after[0]:,}. Please check the Duplicates tab.",
+            f"{report.shape_after[0]:,}. Please check the Repeated IDs tab.",
             icon="⚠️",
         )
 
-    if n_dup_rows:
-        st.warning(
-            f"**Duplicates found:** {report.duplicate_id_count:,} Order Item ID(s) appear more "
-            f"than once ({n_dup_rows:,} rows). See the *Duplicates* tab below.",
+    if n_rep_rows:
+        st.info(
+            f"**{report.repeated_id_count:,} Order Item ID(s) appear on more than one row** "
+            f"({n_rep_rows:,} rows). These are treated as multi-quantity items, not duplicates: "
+            "each row is mapped to its **own** MongoDB record (1st row → 1st record, 2nd row → "
+            "2nd record, …), so no two rows share a Sale Order Code. See the *Repeated IDs* tab.",
             icon="🔁",
         )
     else:
-        st.success("**No duplicates** found on the Order Item ID column.", icon="✅")
+        st.success("No repeated Order Item IDs in this upload.", icon="✅")
+
+    if n_shared:
+        st.error(
+            f"**{n_shared:,} row(s) ended up on the same MongoDB record** (same Sale Order Item "
+            "Code). This shouldn't happen — please check these rows before dispatching.",
+            icon="🚨",
+        )
 
     if n_unmapped or n_missing:
         st.error(
@@ -278,7 +288,7 @@ def _render_review(result: dict) -> None:
         f"📋 All orders ({len(data):,})",
         f"🚫 Not mapped ({n_unmapped:,})",
         f"📭 Missing shipping/tracking ({n_missing:,})",
-        f"🔁 Duplicates ({n_dup_rows:,})",
+        f"🔁 Repeated IDs ({n_rep_rows:,})",
         f"🏭 Unknown facility ({len(report.unknown_facility_rows):,})",
         "🗂️ Files & facilities",
     ])
@@ -292,7 +302,14 @@ def _render_review(result: dict) -> None:
         c2.caption(f"Mapped but Tracking Number blank: **{len(report.missing_tracking_rows):,}**")
         _show_df(report.missing_ship_or_track_rows, key="tbl_missing")
     with tabs[3]:
-        _show_df(report.duplicate_rows, key="tbl_dupes")
+        if n_rep_rows:
+            st.caption("Each row shows the Sale Order Item Code / Sale Order Code it was paired "
+                       "with. Rows without one had no MongoDB record left to pair with.")
+        rep = report.repeated_rows
+        front = ["Order ID", "Order Item ID", config.MONGO_MATCH_FIELD, "Sale Order Code",
+                 "Tracking Number", dp.MONGO_MATCH_STATUS_COLUMN]
+        front = [c for c in front if c in rep.columns]
+        _show_df(rep[front + [c for c in rep.columns if c not in front]], key="tbl_dupes")
     with tabs[4]:
         _show_df(report.unknown_facility_rows, key="tbl_unknown_fac")
     with tabs[5]:
@@ -322,7 +339,7 @@ def _render_review(result: dict) -> None:
             "All Orders": data,
             "Not Mapped": report.unmapped_rows,
             "Missing Ship-Track": report.missing_ship_or_track_rows,
-            "Duplicates": report.duplicate_rows,
+            "Repeated IDs": report.repeated_rows,
             "Unknown Facility": report.unknown_facility_rows,
         }),
         file_name=f"selfship_quality_report_{stamp}.xlsx",
@@ -387,24 +404,13 @@ def _render_date_selection(result: dict) -> tuple[pd.DataFrame, pd.DataFrame, tu
             help="Recommended. Flipkart cannot dispatch an order without tracking details "
                  "and a pickup location.",
         )
-        st.toggle(
-            "Remove duplicate Order Item IDs (keep the first occurrence)",
-            key=K_DROP_DUPES,
-        )
 
     if not selected:
         st.info("Select at least one Dispatch By Date to continue.", icon="👆")
         return None
 
-    working = data
-    removed_dupes = 0
-    if st.session_state[K_DROP_DUPES]:
-        before = len(working)
-        working = working.drop_duplicates(subset="Order Item ID", keep="first")
-        removed_dupes = before - len(working)
-
     self_df, self_not = dp.split_by_dispatch_date(
-        working, selected, exclude_incomplete=st.session_state[K_EXCLUDE]
+        data, selected, exclude_incomplete=st.session_state[K_EXCLUDE]
     )
 
     # Keep the two dataframes in session_state under the names used in the notebook
@@ -425,8 +431,9 @@ def _render_date_selection(result: dict) -> tuple[pd.DataFrame, pd.DataFrame, tu
          "hint": "SELF_NOT_DISPATCHED", "tone": "neutral"},
         {"label": "Held back – incomplete data", "value": n_excluded_incomplete,
          "hint": "Selected date but missing details", "tone": "amber" if n_excluded_incomplete else "green"},
-        {"label": "Duplicates removed", "value": removed_dupes,
-         "hint": "Only if the option is on", "tone": "neutral"},
+        {"label": "Multi-quantity rows", "value": int(
+            self_df.duplicated(subset="Order Item ID", keep=False).sum()),
+         "hint": "Repeated Order Item IDs in SELF", "tone": "blue"},
     ])
     st.write("")
 
@@ -449,7 +456,7 @@ def _render_date_selection(result: dict) -> tuple[pd.DataFrame, pd.DataFrame, tu
                                file_name=f"SELF_NOT_DISPATCHED_{stamp}.csv", mime="text/csv")
 
     selection_sig = (
-        run_id, tuple(selected), st.session_state[K_EXCLUDE], st.session_state[K_DROP_DUPES]
+        run_id, tuple(selected), st.session_state[K_EXCLUDE]
     )
     return self_df, self_not, selection_sig
 
@@ -467,10 +474,23 @@ RESULT_COLUMNS = [
 ]
 
 
+def _dispatch_keys(df: pd.DataFrame) -> pd.Series:
+    """
+    Unique key per order-item unit, so repeated Order Item IDs (multi-quantity)
+    are tracked separately: Order Item ID + Sale Order Item Code + Sale Order Code.
+    """
+    item_code = df[config.MONGO_MATCH_FIELD].astype(str) if config.MONGO_MATCH_FIELD in df.columns \
+        else ""
+    return (df["Order Item ID"].astype(str) + "|" + item_code + "|"
+            + df["Sale Order Code"].astype(str))
+
+
 def _remember_dispatched(results: pd.DataFrame) -> None:
-    """Remember successfully dispatched Order Item IDs so they're never sent twice."""
-    ok = results[results[config.RESULT_DISPATCHED_COLUMN] == "Yes"]["Order Item ID"].astype(str)
-    st.session_state[K_DISPATCHED_IDS] = set(st.session_state[K_DISPATCHED_IDS]) | set(ok)
+    """Remember successfully dispatched units so they're never sent twice."""
+    ok = results[results[config.RESULT_DISPATCHED_COLUMN] == "Yes"]
+    st.session_state[K_DISPATCHED_IDS] = (
+        set(st.session_state[K_DISPATCHED_IDS]) | set(_dispatch_keys(ok))
+    )
 
 
 def _combine_results(results_df: pd.DataFrame, self_not: pd.DataFrame) -> pd.DataFrame:
@@ -601,7 +621,7 @@ def _render_dispatch_results(state: dict, self_not: pd.DataFrame) -> None:
         {"label": "Failed", "value": n_failed, "hint": "Rejected / API error",
          "tone": "red" if n_failed else "green"},
         {"label": "Not sent – data issues", "value": n_missing,
-         "hint": "Missing / invalid / conflicting / duplicate", "tone": "amber" if n_missing else "green"},
+         "hint": "Missing / invalid / conflicting data", "tone": "amber" if n_missing else "green"},
         {"label": "Not selected / held back" if not n_dry else "Dry run – not sent",
          "value": n_held if not n_dry else n_dry,
          "hint": "SELF_NOT_DISPATCHED" if not n_dry else "Dry run mode", "tone": "neutral"},
@@ -751,7 +771,7 @@ def _render_confirmation(self_df: pd.DataFrame, self_not: pd.DataFrame, selectio
 
     if yes:
         st.session_state[K_CONFIRM] = {"answer": "yes", "sig": selection_sig}
-        already_mask = self_df["Order Item ID"].astype(str).isin(st.session_state[K_DISPATCHED_IDS])
+        already_mask = _dispatch_keys(self_df).isin(st.session_state[K_DISPATCHED_IDS])
         outcome = _run_dispatch(self_df[~already_mask])
         if outcome is None:
             st.session_state[K_CONFIRM] = None

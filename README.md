@@ -8,7 +8,7 @@ A Streamlit app to prepare Flipkart **Self-Ship** orders for dispatch.
 
 1. Upload one or many Flipkart Self-Ship CSV files (one per location)
 2. Process: skip first 3 rows → keep/rename columns → strip apostrophes → dates to YYYY-MM-DD → combine all files → fetch MongoDB (`Test.allorders`) → merge → add warehouse columns
-3. Review: shape before/after, duplicates on Order Item ID, unmapped orders, missing Shipping provider / Tracking Number, unknown facilities
+3. Review: shape before/after, repeated (multi-quantity) Order Item IDs, unmapped orders, missing Shipping provider / Tracking Number, unknown facilities
 4. Tick the Dispatch By Date(s) to dispatch → `SELF` and `SELF_NOT_DISPATCHED`
 5. Confirm dispatch on Flipkart (Yes / No) → **Step 1** fetch Flipkart access token → **Step 2** mark shipments as dispatched → download results for every order item
 
@@ -199,14 +199,13 @@ streamlit run app.py
    - The exact same file uploaded twice is ignored automatically.
 3. **Step 3 – Review.**
    - **Shape before merge / after merge** (rows × columns) and whether the row count changed.
-   - **Duplicates** on `Order Item ID` (count + the rows, in the *Duplicates* tab).
+   - **Repeated Order Item IDs** (multi-quantity items). These are **not** duplicates: if an Order Item ID is on 2 rows and MongoDB has 2 records for it (e.g. `…-1` and `…-2`), row 1 is paired with record 1 and row 2 with record 2, so each gets its own Sale Order Code and tracking number. If MongoDB has fewer records than rows, the extra rows show as *not mapped* with the reason in `MongoDB Match Status`.
    - **Orders not mapped** (no MongoDB match) and **Missing Shipping / Tracking**.
    - **Unknown facility** — MongoDB returned a Facility that isn't in the warehouse master in `config.py`.
    - Download the full merged data (CSV) or a multi-sheet quality report (Excel).
 4. **Step 4 – Dispatch By Date.** Tick the dates to dispatch (or use *Select all*, *Clear all*, *Select today & overdue*). Live counts show what goes to `SELF` and `SELF_NOT_DISPATCHED`, each with a download button. `SELF_NOT_DISPATCHED` has a **Not Dispatched Reason** column.
    - **⚙️ Dispatch options:**
      - *Exclude orders with missing Tracking Number / Shipping provider / warehouse* — **ON by default**. Such orders are moved to `SELF_NOT_DISPATCHED` even if their date is selected, since Flipkart can't dispatch them. Turn it off to keep them strictly by date.
-     - *Remove duplicate Order Item IDs (keep first)* — OFF by default.
 5. **Step 5 – Confirm & dispatch.**
    - **Pre-check:** before you click anything, the app lists every selected item that has an empty or invalid field the API needs. Those items **won't be sent**.
    - **🔍 Preview the API request:** shows the exact JSON body for the first 3 shipments.
@@ -242,7 +241,6 @@ streamlit run app.py
 | Failed | Flipkart rejected it, or the API errored — see `Flipkart Response` |
 | Not Sent – Missing Data | A required field was empty or a date was invalid — reason lists which |
 | Not Sent – Conflicting Data | Items sharing a `Sale Order Code` had different tracking/location/dates |
-| Not Sent – Duplicate Row | Same Order Item ID appeared twice; it was sent once via the first row |
 | Skipped – Already Dispatched | Already dispatched earlier in this session; not sent again |
 | Held Back – Incomplete Data | Date was selected but data was incomplete (Step 4 option) |
 | Not Selected for Dispatch | Its Dispatch By Date wasn't ticked |
@@ -271,7 +269,7 @@ streamlit run app.py
 | Extra column | – | `Source File` | tells you which location file a row came from |
 | Credentials | in code | `.streamlit/secrets.toml` | security |
 
-All other logic (column list and names, apostrophe removal, splitting Order Item ID on `-`, keeping the first Mongo doc per base ID, left merge, WH mapping, `Int64` pincode, `reset_index` on both split dataframes) is the same as your notebook.
+All other logic (column list and names, apostrophe removal, splitting Order Item ID on `-`, left merge, WH mapping, `Int64` pincode, `reset_index` on both split dataframes) is the same as your notebook. The one deliberate difference: instead of keeping only the first MongoDB record per Order Item ID, repeated Order Item IDs are paired one-to-one with their MongoDB records (see Step 3 above).
 
 ---
 
