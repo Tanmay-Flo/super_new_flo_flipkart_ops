@@ -135,15 +135,15 @@ def delivery_partner_fields(shipping_provider) -> tuple[str, str]:
     Returns (deliveryPartner, deliveryPartnerCode) from the Shipping provider value.
     Matching is case-insensitive and looks anywhere in the text:
         contains "delhivery" -> ("DELHIVERY", "DELHIVERY")
-        contains "ekart"     -> ("Ekart", "Other")
-        anything else        -> ("Other", "Other")
+        contains "ekart"     -> ("Ekart", "self_ship_vendor")
+        anything else        -> ("Other", "self_ship_vendor")
     """
     text = "" if _blank(shipping_provider) else str(shipping_provider).lower()
     if "delhivery" in text:
         return "DELHIVERY", "DELHIVERY"
     if "ekart" in text:
-        return "Ekart", "Other"
-    return "Other", "Other"
+        return "Ekart", "self_ship_vendor"
+    return "Other", "self_ship_vendor"
 
 
 def delivery_partner(shipping_provider) -> str:
