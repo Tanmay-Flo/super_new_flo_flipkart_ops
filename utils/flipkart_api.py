@@ -138,12 +138,13 @@ def delivery_partner_fields(shipping_provider) -> tuple[str, str]:
         contains "ekart"     -> ("Ekart", "self_ship_vendor")
         anything else        -> ("Other", "self_ship_vendor")
     """
+    other = config.FLIPKART_OTHER_PARTNER_VALUE
     text = "" if _blank(shipping_provider) else str(shipping_provider).lower()
     if "delhivery" in text:
         return "DELHIVERY", "DELHIVERY"
     if "ekart" in text:
-        return "Ekart", "self_ship_vendor"
-    return "Other", "self_ship_vendor"
+        return "Ekart", other
+    return "Other", other
 
 
 def delivery_partner(shipping_provider) -> str:
@@ -336,12 +337,24 @@ def _post_dispatch(token: str, shipments: list[dict]) -> tuple[int, object]:
     return 0, last_error
 
 
-_SUCCESS_WORDS = {"SUCCESS", "SUCCESSFUL", "OK", "DISPATCHED", "COMPLETED"}
-
-
 def _compact(obj) -> str:
     text = obj if isinstance(obj, str) else json.dumps(obj, ensure_ascii=False)
     return text[:1000]
+
+
+def _processing_status(entry: dict) -> str:
+    """Read processingStatus from one shipment entry (key matched case-insensitively)."""
+    for key, value in entry.items():
+        if str(key).replace("_", "").lower() == "processingstatus":
+            return str(value or "").strip().lower()
+    return ""
+
+
+def _error_text(entry: dict) -> str:
+    for key in ("errorMessage", "errorMessages", "errors", "error", "message"):
+        if entry.get(key):
+            return _compact(entry[key])
+    return ""
 
 
 def _parse_response(
@@ -350,12 +363,17 @@ def _parse_response(
     """
     Map Flipkart's response to {shipmentId: (success, message)}.
 
-    Handles a per-shipment list such as
-        {"shipments": [{"shipmentId": "...", "status": "SUCCESS"}, ...]}
-    and falls back to the HTTP status for anything not listed.
-    """
-    outcome: dict[str, tuple[bool, str]] = {}
+    Flipkart answers HTTP 200 even when a shipment FAILS, so the HTTP status
+    alone is never trusted. Each shipment is only marked dispatched when its
+    own entry says  "processingStatus": "success", e.g.
 
+        {"shipments": [{"shipmentId": "H-2122708068666307",
+                        "processingStatus": "failure",
+                        "errorMessage": "Location id does not belong to shipment"}]}
+
+    Anything else - "failure", a missing processingStatus, or a shipment
+    that isn't in the response at all - is treated as NOT dispatched.
+    """
     if not (200 <= status < 300):
         msg = f"HTTP {status}: {_compact(payload)}" if status else str(payload)
         return {sid: (False, msg) for sid in shipment_ids}
@@ -369,23 +387,31 @@ def _parse_response(
     elif isinstance(payload, list):
         entries = payload
 
+    outcome: dict[str, tuple[bool, str]] = {}
     for entry in entries:
         if not isinstance(entry, dict):
             continue
         sid = str(entry.get("shipmentId", entry.get("shipment_id", ""))).strip()
         if sid not in shipment_ids:
             continue
-        status_text = str(entry.get("status", "")).strip().upper()
-        errors = entry.get("errors") or entry.get("errorMessage") or entry.get("message") or ""
-        success = status_text in _SUCCESS_WORDS or (not status_text and not errors)
-        msg = status_text or "OK"
-        if errors:
-            msg += f" — {_compact(errors)}"
-        outcome[sid] = (success, msg)
+
+        proc = _processing_status(entry)
+        error = _error_text(entry)
+
+        if proc == config.FLIPKART_SUCCESS_STATUS:
+            outcome[sid] = (True, "processingStatus: success")
+        elif proc:
+            msg = f"processingStatus: {proc}"
+            outcome[sid] = (False, msg + (f" — {error}" if error else ""))
+        else:
+            outcome[sid] = (False, "No processingStatus in Flipkart's response"
+                            + (f" — {error}" if error else "")
+                            + " — verify in Seller Hub")
 
     for sid in shipment_ids:
         if sid not in outcome:
-            outcome[sid] = (True, f"HTTP {status} — accepted (no per-shipment status returned)")
+            outcome[sid] = (False, f"HTTP {status} but this shipment was not in Flipkart's "
+                                   "response — verify in Seller Hub")
     return outcome
 
 

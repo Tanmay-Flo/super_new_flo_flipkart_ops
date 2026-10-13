@@ -226,3 +226,11 @@ RESULT_TIME_COLUMN = "Dispatch Attempted At (UTC)"
 
 # Folder where every dispatch run is saved automatically (audit trail)
 DISPATCH_LOG_DIR = "dispatch_logs"
+
+# Sent as deliveryPartner / deliveryPartnerCode wherever the value isn't DELHIVERY
+# (and as deliveryPartnerCode for Ekart)
+FLIPKART_OTHER_PARTNER_VALUE = "self_ship_vendor"
+
+# A shipment counts as dispatched ONLY when Flipkart's response has
+# "processingStatus" equal to this (compared in lower case). HTTP 200 alone is not enough.
+FLIPKART_SUCCESS_STATUS = "success"
