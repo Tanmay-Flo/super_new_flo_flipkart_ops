@@ -18,3 +18,8 @@ venv/
 # Dispatch audit logs (contain order data)
 dispatch_logs/
 .env
+
+# Google service-account keys - NEVER commit
+logical-etching-*.json
+*service_account*.json
+*service-account*.json

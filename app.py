@@ -39,7 +39,8 @@ SECTIONS = {
     },
     config.SECTION_RETURNS: {
         "icon": "🔄",
-        "subtitle": "Mark Flipkart Self-Ship orders as returned (coming soon).",
+        "subtitle": "Fetch Flipkart customer & courier returns, match them to Unicommerce "
+                    "and list the Self-Ship returns.",
         "render": returns.render,
     },
 }

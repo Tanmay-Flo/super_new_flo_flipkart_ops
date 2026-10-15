@@ -82,12 +82,15 @@ def test_connection() -> tuple[bool, str]:
 def fetch_orders_by_item_ids(
     order_item_ids: list[str],
     progress_callback: Callable[[int, int], None] | None = None,
+    projection: dict | None = None,
 ) -> list[dict]:
     """
     Fetch MongoDB docs whose 'Sale Order Item Code' is either exactly the ID
     or the ID followed by '-something'. Same logic as your notebook:
 
         {"Sale Order Item Code": {"$regex": f"^{order_id}(-|$)"}}
+
+    projection: fields to return (defaults to config.MONGO_PROJECTION).
 
     Done in batches of config.MONGO_BATCH_SIZE using $in with anchored regexes,
     which is much faster than one giant $or and can use an index on
@@ -97,6 +100,7 @@ def fetch_orders_by_item_ids(
         return []
 
     collection = get_collection()
+    projection = projection or config.MONGO_PROJECTION
     results: list[dict] = []
     total = len(order_item_ids)
     batch_size = config.MONGO_BATCH_SIZE
@@ -105,7 +109,7 @@ def fetch_orders_by_item_ids(
         batch = order_item_ids[start:start + batch_size]
         patterns = [Regex(f"^{re.escape(str(oid))}(-|$)") for oid in batch]
         query = {config.MONGO_MATCH_FIELD: {"$in": patterns}}
-        results.extend(collection.find(query, config.MONGO_PROJECTION))
+        results.extend(collection.find(query, projection))
 
         if progress_callback:
             progress_callback(min(start + batch_size, total), total)

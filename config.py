@@ -18,7 +18,7 @@ APP_NAME = "Flo x Flipkart Operations"
 APP_ICON = "📦"
 
 SECTION_DISPATCH = "Dispatch Self-Ship Orders"
-SECTION_RETURNS = "Mark Orders as Returned"   # placeholder name - not final
+SECTION_RETURNS = "Self-Ship Returns"
 
 # ==========================================================================
 # FLIPKART SELF-SHIP CSV SETTINGS
@@ -227,10 +227,70 @@ RESULT_TIME_COLUMN = "Dispatch Attempted At (UTC)"
 # Folder where every dispatch run is saved automatically (audit trail)
 DISPATCH_LOG_DIR = "dispatch_logs"
 
-# Sent as deliveryPartner / deliveryPartnerCode wherever the value isn't DELHIVERY
-# (and as deliveryPartnerCode for Ekart)
+# Sent as deliveryPartnerCode for every partner except DELHIVERY (Ekart and Other)
 FLIPKART_OTHER_PARTNER_VALUE = "self_ship_vendor"
 
 # A shipment counts as dispatched ONLY when Flipkart's response has
 # "processingStatus" equal to this (compared in lower case). HTTP 200 alone is not enough.
 FLIPKART_SUCCESS_STATUS = "success"
+
+# ==========================================================================
+# SELF-SHIP RETURNS (Flipkart Returns API v2)
+# ==========================================================================
+FLIPKART_RETURNS_URL = "https://api.flipkart.net/sellers/v2/returns"
+
+# The API's "nextUrl" is relative (e.g. "/returns/search/ewog..."), so it is
+# joined to this base to build the next page's URL.
+FLIPKART_RETURNS_NEXT_BASE = "https://api.flipkart.net/sellers/v2"
+
+# Both sources are fetched; the 'type' field in the response holds the same value
+RETURN_SOURCES = {
+    "customer_return": "Customer Return",
+    "courier_return": "Courier Return",
+}
+
+# Returns created AFTER this date/time are fetched (sent as createdAfter, no offset)
+RETURNS_CREATED_AFTER = "2026-09-01T00:00:00"
+
+# Timezone used for dates shown in the returns tables
+RETURNS_TIMEZONE = "Asia/Kolkata"
+
+# Safety stop so a pagination bug can never loop forever (25 returns per page)
+RETURNS_MAX_PAGES = 2000
+
+# MongoDB field that says whether Flipkart (channel) does the shipping
+CHANNEL_SHIPPING_FIELD = "Channel Shipping"
+
+RETURNS_MONGO_PROJECTION = {**MONGO_PROJECTION, CHANNEL_SHIPPING_FIELD: 1}
+RETURNS_MONGO_MERGE_COLUMNS = MONGO_MERGE_COLUMNS + [CHANNEL_SHIPPING_FIELD]
+
+# Column added by the app that classifies each return
+RETURN_CATEGORY_COLUMN = "Return Category"
+RETURN_FACILITY_COLUMN = "Return Location (Facility)"
+
+# ==========================================================================
+# GOOGLE SHEET SYNC (returns)
+# Credentials: [gcp_service_account] in secrets (see README / secrets example)
+# ==========================================================================
+GSHEET_SPREADSHEET_ID = "1dAD-lxlMEKcWuSlg8ONxrtkmrqFI5LTUAsDuojhGGVE"
+GSHEET_URL = f"https://docs.google.com/spreadsheets/d/{GSHEET_SPREADSHEET_ID}/edit"
+
+# Result group -> tab name in the "Flipkart Returns" spreadsheet
+GSHEET_TABS = {
+    "self_ship": "Self-Ship Returns",
+    "needs_check": "Needs Check",
+    "flipkart_managed": "Flipkart Managed",
+}
+
+# Rows are matched on this column: existing returnIds are updated, new ones appended
+GSHEET_KEY_COLUMN = "returnId"
+
+# Extra column written on every synced row (IST time of the sync)
+GSHEET_SYNC_COLUMN = "Last Synced (IST)"
+
+# Sync automatically after every "Fetch returns"
+GSHEET_AUTO_SYNC = True
+
+# A return belongs to exactly one tab. If its category changed since the last
+# sync (e.g. "Needs Check" -> "Self-Ship Returns"), remove it from the old tab.
+GSHEET_MOVE_BETWEEN_TABS = True

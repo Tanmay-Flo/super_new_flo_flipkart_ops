@@ -254,7 +254,9 @@ def _suffix_sort_key(code: str) -> tuple:
         return (2, 0, suffix)
 
 
-def prepare_mongo_df(mongo_records: list[dict]) -> pd.DataFrame:
+def prepare_mongo_df(
+    mongo_records: list[dict], merge_columns: list[str] | None = None
+) -> pd.DataFrame:
     """
     Turn raw MongoDB documents into a clean dataframe:
       - create base 'Order Item ID' from 'Sale Order Item Code'
@@ -266,15 +268,15 @@ def prepare_mongo_df(mongo_records: list[dict]) -> pd.DataFrame:
         with the same suffix keep MongoDB's order
       - number them 0, 1, 2 ... per Order Item ID (used for one-to-one pairing)
     """
-    out_cols = ["Order Item ID", OCCURRENCE_COLUMN, config.MONGO_MATCH_FIELD] + \
-        config.MONGO_MERGE_COLUMNS
+    merge_columns = merge_columns or config.MONGO_MERGE_COLUMNS
+    out_cols = ["Order Item ID", OCCURRENCE_COLUMN, config.MONGO_MATCH_FIELD] + merge_columns
 
     mongo_df = pd.DataFrame(mongo_records)
     if mongo_df.empty:
         return pd.DataFrame(columns=out_cols)
 
     # Make sure every expected column exists even if Mongo didn't return it
-    for col in [config.MONGO_MATCH_FIELD] + config.MONGO_MERGE_COLUMNS:
+    for col in [config.MONGO_MATCH_FIELD] + merge_columns:
         if col not in mongo_df.columns:
             mongo_df[col] = None
 
@@ -291,7 +293,9 @@ def prepare_mongo_df(mongo_records: list[dict]) -> pd.DataFrame:
     return mongo_df[out_cols].reset_index(drop=True)
 
 
-def merge_mongo_data(self_df: pd.DataFrame, mongo_df: pd.DataFrame) -> pd.DataFrame:
+def merge_mongo_data(
+    self_df: pd.DataFrame, mongo_df: pd.DataFrame, merge_columns: list[str] | None = None
+) -> pd.DataFrame:
     """
     Left-merge MongoDB columns onto SELF, pairing repeated Order Item IDs
     one-to-one (n-th row of an Order Item ID gets its n-th MongoDB record).
@@ -303,7 +307,7 @@ def merge_mongo_data(self_df: pd.DataFrame, mongo_df: pd.DataFrame) -> pd.DataFr
 
     if mongo_df.empty:
         out[config.MONGO_MATCH_FIELD] = None
-        for col in config.MONGO_MERGE_COLUMNS:
+        for col in (merge_columns or config.MONGO_MERGE_COLUMNS):
             out[col] = None
     else:
         out = out.merge(mongo_df, on=["Order Item ID", OCCURRENCE_COLUMN], how="left")
